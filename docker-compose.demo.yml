@@ -1,0 +1,42 @@
+name: innquietus-plataforma-demo
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: control_clientes
+      TZ: America/Mexico_City
+    ports:
+      - "127.0.0.1:${DB_PORT:-5434}:5432"
+    volumes:
+      - demo_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d control_clientes"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://demo:demo@db:5432/control_clientes
+      JWT_SECRET: demo-solo-para-pruebas-locales-no-usar-en-produccion-0123456789
+      JOBS_SECRET: demo-jobs-solo-pruebas-locales-0123
+      AES_KEY_B64: ZGVtby1hZXMta2V5LWZvci1sb2NhbC10ZXN0cy1vbmw=
+      CORS_ORIGINS: http://localhost:8000
+      SEED_ON_START: "true"
+      PORT: "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+
+volumes:
+  demo_db:

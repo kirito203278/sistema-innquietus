@@ -1,0 +1,6 @@
+services:
+  backend:
+    environment:
+      RELOAD: "true"
+    volumes:
+      - ./backend/app:/app/app

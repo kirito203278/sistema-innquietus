@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+**/__pycache__
+**/.pytest_cache
+**/node_modules
+backend/app/static
+backend/seed_credentials.txt
+backend/tests
+docs
+*.pdf

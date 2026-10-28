@@ -1,0 +1,11 @@
+.env
+*.env.local
+__pycache__/
+node_modules/
+backend/app/static/
+*.pdf
+credenciales*
+seed_credentials.txt
+.venv/
+.pytest_cache/
+.devpg/
