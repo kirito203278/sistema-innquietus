@@ -1,0 +1,311 @@
+================================================================================
+SEPARACIÓN CM / ADMINISTRADOR — BITÁCORA DE ESTA SESIÓN
+================================================================================
+FECHA: 2026-10-06
+PROYECTO: /home/kiri/Documentos/control-clientes
+REPOSITORIO: https://github.com/kirito203278/control-clientes (privado)
+PARTE DE: continuación de docs/BITACORA_SESION.txt (secciones [S01]–[S20]).
+          Este archivo sustituye a aquella bitácora donde choquen; todo lo que
+          no se menciona aquí sigue igual.
+PRUEBAS: 199 automatizadas, todas en verde (eran 186).
+COMMITS NUEVOS: 3 (sin push; los sube el usuario).
+================================================================================
+
+
+================================================================================
+[C01] LO QUE SE PIDIÓ
+================================================================================
+Textual del usuario, resumido en puntos:
+1. Quitar la pestaña «Ingresos» del perfil del CM.
+2. La parte de «1ra quincena / 2da quincena» del CM: replicar la distribución
+   de la cartera del admin (tabla, no lista en la barra lateral).
+3. Pagos, ingresos y prórrogas: fuera del perfil del CM; pasan al perfil del
+   admin, por cliente.
+4. En el perfil del CM dejar solo: información del paquete, fecha de renovación,
+   cuándo renueva y lo de la prórroga.
+5. La prórroga en el CM sin captura de monto.
+6. Conservar en el CM el bloqueo y la ventana que pregunta; el admin también las
+   tiene, y solo el admin escribe montos.
+
+PRECISIONES QUE DIO EL USUARIO AL PREGUNTARLE (importantes):
+- P1: «el cm solamente manipulará si renovó o no, y le aparecerán pantallas de
+  que se bloqueó por falta de pago, pero el cm NO puede poner si solicitó la
+  prórroga, hasta que el admin lo realice».
+- P2: quitar también la pestaña «Reportes» del CM.
+- P3: el CM no ve NINGÚN monto.
+- P4: «el cm sí da de alta clientes nuevos, con los datos; el costo del paquete
+  es diferente a lo pagado, los paquetes ya van a tener costo, eso los ajusta el
+  administrador, agrégalo, y siempre lo pagado va a ir en cero».
+
+
+================================================================================
+[C02] CHOQUES CON LAS REGLAS VIEJAS (avisados antes de tocar nada)
+================================================================================
+CH1 | [S03.3] decía que el CM registra pagos y borra los suyos el mismo día.
+    | AHORA: el CM no registra ni borra pagos. Nadie más que el admin los borra,
+    | y sin límite de fecha. La regla del «mismo día» desaparece.
+CH2 | [S03.12] decía que el CM obtiene Ingresos y Reportes filtrados a su
+    | cartera. AHORA: 403 para el CM en /api/ingresos y /api/reportes/*.
+CH3 | [S03.4] caso 1: «Sí va a renovar» habilitaba «las funciones del cliente»
+    | el resto del día, que en la práctica era registrar el pago. AHORA eso lo
+    | hace el admin; el CM solo deja constancia de la decisión.
+CH4 | [S03.5] la prórroga la activaba el CM. AHORA solo el admin.
+CH5 | [S03.6] el cambio de paquete se elegía al confirmar la renovación. AHORA
+    | solo si quien confirma es admin; si confirma un CM, renueva con el mismo
+    | paquete (el backend ignora paquete_id/tipo_id/costo del CM).
+
+
+================================================================================
+[C03] REGLAS NUEVAS Y VIGENTES
+================================================================================
+[C03.1] VISIBILIDAD DEL DINERO
+- Un usuario con rol `cm` NO recibe del servidor: costo, pagado, restante,
+  avance_pct, la lista de pagos, el historial de costos de renovación ni el
+  costo dentro de `renovara_con`. Se filtra en la API, no solo en pantalla.
+- Afecta a: ficha del cliente, detalle de paquete, /api/bloqueos, el tablero de
+  renovaciones y las respuestas de renovar / confirmar / revertir.
+- El admin (incluido el de solo lectura) sigue viendo todo.
+
+[C03.2] PERMISOS (403 para el CM)
+- POST   /api/paquetes/{id}/pagos
+- DELETE /api/pagos/{id}
+- POST   /api/paquetes/{id}/prorroga
+- POST   /api/paquetes/{id}/recordatorio
+- GET    /api/paquetes/{id}/recordatorios
+- POST   /api/recordatorios/{id}/marcar-enviado
+- GET    /api/ingresos
+- GET    /api/reportes/datos | /pdf | /excel
+El admin de solo lectura conserva lectura: Ingresos y Reportes sí, escrituras no.
+
+[C03.3] QUÉ SIGUE PUDIENDO EL CM
+- Dar de alta clientes (con o sin su primer paquete) y editar sus datos.
+- Corregir la fecha de inicio del paquete.
+- Ventana de decisión: «Sí, va a renovar», «Renovó» (cuando ya está pagado) y
+  «No renovó», incluido borrar el paquete y mandar el cliente a No renovados.
+- Deshacer la confirmación y la marca de «no renovará».
+- Reingresar clientes desde No renovados (el costo sale del catálogo).
+- Ver su tablero de renovaciones, sus notificaciones y su cartera.
+
+[C03.4] LA PRÓRROGA ES DEL ADMIN
+- Cuando el paquete queda bloqueado y la única salida sería la prórroga, el CM
+  ve: «Confirmó que renovará pero quedó bloqueado por falta de pago. La prórroga
+  la autoriza el administrador», con un solo botón: «No renovó».
+- El admin ve la ventana completa: «Solicitó prórroga (5 días)» y «No renovó»,
+  con el monto adeudado.
+- Todo lo demás de la prórroga no cambió: 5 días naturales, fecha automática,
+  una por ciclo, conserva la fecha de renovación original al renovar.
+
+[C03.5] COSTO EN EL CATÁLOGO DE PAQUETES  (regla nueva)
+- `catalogo_paquetes` tiene columna `costo` (migración 007).
+- Al dar de alta un cliente o un paquete:
+  · si lo hace un CM, el costo se toma del catálogo (se ignora lo que mande);
+  · si lo hace un admin, puede fijar el costo que quiera.
+- Lo pagado siempre empieza en cero: el alta no crea ningún pago.
+- El admin ajusta el costo en Catálogos (campo nuevo junto al nombre) y puede
+  corregir el del cliente en «Editar paquete», como antes.
+- El reingreso con paquete nuevo toma también el costo del catálogo si quien
+  reingresa es CM.
+
+[C03.6] PANEL DEL CM (interfaz)
+- Barra lateral: solo navegación — «Mi cartera», «Renovaciones», «No renovados»
+  (más la campanita y cerrar sesión). Ya no lleva la lista de clientes ni el
+  botón de agregar ni el buscador.
+- «Mi cartera» es una tabla igual a la cartera del admin: semáforo, cliente,
+  paquetes vigentes, próxima renovación, teléfono y la marca «decidir»; arriba,
+  los filtros «Todos / 1ra quincena / 2da quincena», el buscador y el botón
+  «+ Agregar cliente».
+- Se quitaron del CM: Ingresos, Reportes, la sección de Pagos, la barra de
+  avance, el botón «Mensaje de pago para el cliente» y el botón de «Mensaje para
+  el cliente» de la campanita.
+- La ficha del CM muestra del paquete: tipo, paquete, fecha de renovación,
+  renovaciones con ese paquete, estado, semáforo, los días que faltan y el
+  bloque de prórroga en texto (sin montos).
+
+
+================================================================================
+[C04] ARCHIVOS TOCADOS
+================================================================================
+BACKEND
+  app/migrations/sql/007_costo_catalogo.sql ... NUEVO. Agrega catalogo_paquetes.costo
+                                                (NOT NULL DEFAULT 0, CHECK >= 0),
+                                                pone costos base por nombre y luego
+                                                el último costo realmente usado por
+                                                cada paquete, si hay datos.
+  app/services/visibilidad.py ................. NUEVO. oculta_montos(user),
+                                                paquete_visible(), paquetes_visibles().
+  app/models.py ............................... CatalogoPaquete.costo
+  app/routers/catalogos.py .................... costo en alta y edición (solo paquetes,
+                                                solo admin); bitácora serializa el costo
+                                                como texto (JSONB no admite Decimal).
+  app/routers/paquetes.py ..................... require_admin_write en pagos, prórroga y
+                                                recordatorios; detalle filtrado para CM.
+  app/routers/clientes.py ..................... costo_de_alta(), crear_ciclo recibe el
+                                                usuario, ficha_out filtra montos.
+  app/routers/renovacion.py ................... salidas filtradas; un CM no puede elegir
+                                                otro paquete al confirmar.
+  app/routers/ingresos.py, reportes.py ........ require_admin.
+  app/services/renovacion.py .................. reingreso toma el costo del catálogo.
+  app/seed.py ................................. fija los costos del catálogo.
+
+FRONTEND
+  pages/cm/CarteraCm.tsx ...................... NUEVO. La tabla de «Mi cartera».
+  pages/cm/CmPanel.tsx ........................ Reescrito con la distribución del admin.
+  pages/shared/ClienteFicha.tsx ............... Sin montos ni pagos para el CM; ventana
+                                                de decisión sin prórroga para el CM.
+  pages/shared/modales.tsx .................... CamposPaquete con `sinCosto`;
+                                                ConfirmarRenovacionModal con `sinMontos`.
+  pages/shared/Tablero.tsx .................... Tarjetas sin montos para el CM.
+  pages/shared/NoRenovados.tsx ................ Reingreso sin costo para el CM.
+  pages/admin/CatalogosView.tsx ............... Campo de costo por paquete.
+  components/NotificationBell.tsx ............. Sin «Mensaje para el cliente» en el CM.
+  auth/AuthContext.tsx ........................ `esCm`.
+  api/types.ts ................................ CatalogoItem.costo.
+
+DOCUMENTOS
+  ESTADO.md ................................... Sección «Separación CM / administrador».
+  docs/CAMBIOS_SEPARACION_CM_ADMIN.txt ........ este archivo.
+
+
+================================================================================
+[C05] PRUEBAS
+================================================================================
+TOTAL: 196 (eran 186). Se corren igual: `cd backend && python -m pytest -q`
+       (necesita `docker compose up -d db`).
+
+PRUEBAS NUEVAS (9)
+  test_clientes_paquetes.py
+    - el CM no registra pagos, ni prórroga, ni mensaje de cobro (403 en las 4 rutas)
+    - la ficha y el detalle del CM no traen montos ni pagos, y el admin sí
+    - el tablero y /api/bloqueos del CM tampoco traen montos
+    - el CM da de alta con el costo del catálogo y sin pagos
+    - el admin sí fija el costo al dar de alta
+    - el costo del catálogo solo lo cambia el admin
+  test_renovacion.py
+    - el CM decide renovó / no renovó, pero la prórroga la activa el admin
+    - el CM confirma que va a renovar y marca que no renovó
+    - el CM renueva cuando ya está pagado, pero no puede elegir otro paquete
+  test_ingresos_reportes.py
+    - el CM no entra a Ingresos ni a Reportes (403 en las 4 rutas)
+    - el admin de solo lectura sí descarga reportes
+
+PRUEBAS ADAPTADAS (las reglas que cambiaron)
+  - test_cm_no_borra_pago_de_otro_cm → test_cm_no_borra_pagos_el_admin_si
+  - test_borrar_pago_solo_el_mismo_dia_del_autor →
+    test_el_admin_borra_pagos_de_cualquier_fecha
+  - test_cm_solo_ve_su_cartera_en_ingresos_y_reportes_aunque_pida_otro_cm →
+    test_el_cm_no_entra_a_ingresos_ni_a_reportes
+  - Los escenarios de test_renovacion.py y test_clientes_paquetes.py ahora traen
+    un admin: `ctx["h"]` es el admin y `ctx["h_cm"]` el CM. Las pruebas de
+    aislamiento por CM usan `h_cm`.
+
+
+================================================================================
+[C06] VERIFICACIÓN MANUAL HECHA
+================================================================================
+- Migración 007 aplicada sobre la base de desarrollo que ya tenía datos: tomó el
+  último costo usado por paquete (Básico 1500, Estándar 2500, Élite 4500,
+  Campaña 6000). No rompió nada.
+- Revisado en el navegador (http://localhost:8000):
+  · CM: barra lateral con 3 opciones, tabla de cartera con las quincenas, ficha
+    sin montos, ventana de bloqueo con «No renovó» y el aviso de que la prórroga
+    la autoriza el administrador.
+  · Admin: ventana de bloqueo completa con «Solicitó prórroga (5 días)» y el
+    monto adeudado; Catálogos con el campo de costo.
+- Compilación de TypeScript sin errores.
+
+CONTRASEÑAS DE DEMO (cambiadas en esta sesión, a petición del usuario: solo
+números, 8 dígitos). Están fijas en backend/app/seed.py, así que se mantienen
+al recargar el demo. Solo para desarrollo.
+  admin.demo    10000001   administrador
+  lectura.demo  10000002   administrador de solo lectura
+  ana.ruiz      10000003   CM
+  beto.luna     10000004   CM
+  carla.soto    10000005   CM
+Se actualizaron también README.md, COMO_EJECUTAR.md y la prueba del seed.
+
+
+================================================================================
+[C06b] SEGUNDA TANDA: REGLAS REPASADAS CON EL USUARIO
+================================================================================
+El usuario repasó las reglas completas. Casi todas ya estaban implementadas; se
+listan aquí para que no se vuelvan a tocar por error.
+
+YA ESTABA ASÍ (confirmado, no se tocó)
+- 30 días por ciclo, contados desde el inicio del contrato de cada cliente. Todo
+  el ciclo de cobro va por la fecha de contrato, NO por el calendario del mes.
+- «No renovará»: se archiva solo al terminar el contrato y el cliente pasa a No
+  renovados conservando su información.
+- Confirmó que renovará y no paga el día de la renovación: se bloquea ese
+  cliente; al admin se le pregunta por la prórroga; al CM solo le aparece
+  «bloqueado por falta de pago».
+- Con prórroga, el nuevo contrato conserva la fecha de renovación original.
+- Prórroga de 5 días naturales; si no paga, el cliente pasa a No renovados.
+- El cliente que vuelve después: se reingresa desde No renovados, el ciclo
+  empieza ese día y renueva a los 30. Ningún cliente renueva con saldo: si queda
+  debiendo, al terminar su contrato entra otra vez el bloqueo y la prórroga.
+- No contesta en la fecha de corte: ventana con 2 días naturales; sin respuesta,
+  pasa solo a No renovados guardando su información.
+- No renovados: se guardan 1 año.
+- Reingreso: lo pueden hacer el CM y el admin, con el CM que tenía asignado.
+- Reasignar un cliente de un CM a otro: solo el admin, y se va con toda su
+  información (incluido el archivo de no renovados).
+- Al mover un cliente, su proyección y lo pagado se van con él: los reportes
+  agrupan por el CM actual del cliente. Hay prueba nueva que lo fija.
+
+CAMBIOS HECHOS EN ESTA TANDA
+1. Eliminar clientes: solo el admin y SOLO los que están en No renovados
+   (409 si está activo, 403 si lo intenta un CM). Botón «Eliminar…» nuevo en la
+   pantalla de No renovados; el de la ficha solo sale si se cumple la regla.
+2. El CM ya no borra paquetes: en «No renovó» solo le queda «Conservar en
+   historial» (403 en el servidor si manda accion="borrar").
+3. Baja de un CM con clientes: hay que elegir a qué CM pasan todos. Se quitó la
+   opción de dejarlos «por reasignar» (campo `dejar_por_reasignar` eliminado de
+   la API). Para repartirlos entre varios, se reasignan antes desde Cartera.
+4. El aviso de decisiones pendientes ahora también sale en el panel del admin,
+   igual que en el del CM.
+5. Ingresos y Reportes abren en «mes completo»; las quincenas siguen como filtro.
+6. Datos de ejemplo: dos clientes nuevos en «Renovados sin pago» (33 clientes en
+   total, eran 31).
+
+CUÁNDO APARECE «RENOVADOS SIN PAGO»  (la duda del usuario)
+Con las reglas vigentes un paquete no renueva debiendo, así que la columna solo
+se llena cuando el ciclo YA renovado se queda con saldo después:
+  · el admin corrigió el costo hacia arriba después de renovar
+    → ejemplo: Mueblería Don Rafa (Beto), costo 2500, pagado 1800;
+  · se borró un pago mal capturado de un ciclo ya renovado
+    → ejemplo: Barbería El Corte (Carla), costo 1500, pagado 900.
+El cliente que confirmó que renovará y aún no paga NO sale ahí: está en amarillo
+y pasa a «Vencidos sin decisión» cuando se le termina el contrato.
+
+
+================================================================================
+[C07] PENDIENTES Y COSAS A DECIDIR
+================================================================================
+T1 | Subir los commits a GitHub (lo hace el usuario; el asistente nunca empuja).
+T2 | Decidir si el CM debería ver algún indicador de pago sin cifras (hoy le
+   | queda el semáforo: verde = pagado, amarillo = confirmado sin pago).
+T3 | El PDF y el Excel siguen existiendo igual, pero ya solo los descarga un
+   | admin. Si alguien del equipo esperaba el reporte del CM, hay que avisarle.
+T4 | Los pendientes viejos de [S18] siguen abiertos: desplegar en Render,
+   | configurar los cron, cambiar la contraseña de Neon, dar de alta al equipo
+   | real.
+T5 | Al CM le aparece «Renovaciones con este paquete» y el historial de ciclos
+   | sin costos; si estorba, se puede recortar más.
+
+
+================================================================================
+[C08] CÓMO TRABAJAR EN LA SIGUIENTE SESIÓN
+================================================================================
+- Leer primero docs/BITACORA_SESION.txt y luego este archivo: donde choquen,
+  manda este.
+- Antes de cambiar una regla, revisar [S03] y [S09] de la bitácora vieja y
+  [C03] de aquí.
+- Para cada regla crítica que se toque, escribir o ajustar su prueba.
+- Los commits no llevan línea de coautor y el asistente nunca hace `git push`.
+- Los secretos solo en `.env` (está en `.gitignore`).
+- Si algo que pide el usuario choca con una regla escrita, decírselo en vez de
+  decidir por cuenta propia.
+
+================================================================================
+FIN
+================================================================================

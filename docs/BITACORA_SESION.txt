@@ -1,0 +1,724 @@
+================================================================================
+BITACORA DE LA SESION — SISTEMA DE CONTROL DE CLIENTES Y PAQUETES (INNquietus)
+================================================================================
+GENERADO: 2026-10-06
+PROYECTO: /home/kiri/Documentos/control-clientes
+REPOSITORIO: https://github.com/kirito203278/control-clientes (privado)
+SESIONES: 2026-10-01 (construccion completa) y 2026-10-02/06 (ajustes y soporte)
+FORMATO: secciones [S##]; dentro de cada seccion, lineas CLAVE: valor o listas
+         con guion. Pensado para leerse con un script y tambien a ojo.
+================================================================================
+
+
+================================================================================
+[S01] RESUMEN EJECUTIVO
+================================================================================
+OBJETIVO: sustituir el Excel de control de clientes de la agencia INNquietus por
+          una aplicacion web con panel para CM y para administrador.
+BASE: se reutilizaron los patrones de un proyecto anterior de la misma agencia
+      (sistema de campanas), solo como referencia de lectura; no se copio codigo
+      completo ni datos ni claves.
+ESTADO_FINAL: terminado y probado en local; falta desplegarlo en produccion.
+PRUEBAS: 186 pruebas automatizadas, todas en verde.
+COMMITS: 22.
+ARCHIVOS_VERSIONADOS: 117.
+LINEAS_BACKEND_APP: 2535
+LINEAS_PRUEBAS: 1883
+LINEAS_FRONTEND_SRC: 2295
+PENDIENTE_PRINCIPAL: desplegar en Render + Neon; subir los ultimos commits a GitHub.
+
+
+================================================================================
+[S02] STACK TECNICO
+================================================================================
+BACKEND: Python 3.14 + FastAPI + SQLAlchemy 2 + APScheduler
+BASE_DATOS: PostgreSQL 16 (local en Docker) / Neon (produccion)
+FRONTEND: React 19 + TypeScript + Vite (lo compila el backend y lo sirve igual)
+AUTENTICACION: JWT de 12 horas, guardado en sessionStorage (no localStorage)
+CONTRASENAS: bcrypt
+CIFRADO: AES-GCM para las credenciales de Facebook de los clientes
+REPORTES: ReportLab (PDF) y openpyxl (Excel)
+EMPAQUETADO: Docker, Dockerfile de dos etapas (node compila, python sirve)
+ZONA_HORARIA: America/Mexico_City en toda la aplicacion
+DESPLIEGUE_PREVISTO: Render (aplicacion) + Neon (base) + cron-job.org + UptimeRobot
+
+
+================================================================================
+[S03] REGLAS DE NEGOCIO VIGENTES
+================================================================================
+Estas son las reglas finales. Varias cambiaron durante la sesion; aqui esta la
+version que quedo en el codigo. El historial de cambios esta en [S09].
+
+[S03.1] CICLO Y FECHAS
+- Un ciclo dura 30 dias fijos.
+- Al dar de alta un paquete se captura la FECHA DE INICIO; la fecha de
+  renovacion se calcula sola (inicio + 30 dias) y no se escribe a mano.
+- El contrato termina el dia de renovacion (R) a las 23:59, hora de Mexico.
+- Al renovar, el ciclo nuevo empieza el dia en que se confirma la renovacion.
+- Excepcion: si hubo prorroga, el ciclo nuevo conserva la fecha de renovacion
+  original (empieza en R), no se recorre al dia del pago.
+- Si cambia la fecha de renovacion, el cliente se mueve solo de quincena.
+  Quincena 1 = dias 1 al 15. Quincena 2 = dia 16 al ultimo dia real del mes.
+
+[S03.2] UN CLIENTE, UN PAQUETE
+- Cada cliente tiene un solo paquete. La aplicacion rechaza un segundo paquete
+  (409) y un alta con dos (422).
+- Se aplica en la aplicacion, no con un indice unico en la base, para que la
+  migracion no falle en bases que ya tengan datos antiguos.
+
+[S03.3] PAGOS
+- Lo pagado se calcula sumando una tabla de pagos; no es un campo suelto.
+- Se aceptan pagos parciales. No se admite un pago mayor al saldo pendiente.
+- No se admiten pagos con fecha futura.
+- Un CM solo puede borrar sus propios pagos y el mismo dia en que los registro.
+
+[S03.4] VENCIMIENTO Y VENTANA DE DECISION (los tres casos)
+- No hay dias de tolerancia de pago.
+- Desde R+1, si no se renovo, el paquete queda BLOQUEADO y aparece una ventana
+  dentro de la ficha del cliente. Solo se pausa ese cliente: con los demas se
+  sigue trabajando normal.
+- El bloqueo lo calcula el servidor por la fecha, no depende de que haya corrido
+  un trabajo programado.
+- Mientras hay bloqueo, toda escritura sobre ese cliente se rechaza con
+  409 code=bloqueado, salvo las salidas de la ventana. Aplica tambien al admin.
+- CASO 1 (el cliente no contesta): la ventana pregunta "¿va a renovar o no?".
+  Hay 2 dias de tolerancia; sin respuesta pasa solo a No renovados.
+  Si contesta que si: ese dia queda como inicio del nuevo contrato y se habilitan
+  las funciones del cliente el resto del dia. A las 23:59 de ese mismo dia, si no
+  pago, la ventana vuelve y pregunta por prorroga o no renovo.
+- CASO 2 (dijo que no renovara): se marca y se archiva solo al terminar el
+  contrato; no aparece ventana. Se puede deshacer antes de R.
+- CASO 3 (confirmo que renovara pero no ha pagado): queda en amarillo; si paga
+  completo se renueva solo; al terminar el contrato se bloquea y pregunta por la
+  prorroga.
+- Quien ya confirmo que renueva NO tiene el plazo de 2 dias: la ventana queda
+  pendiente hasta que el CM decida. (Decision tomada por el asistente, señalada
+  al usuario para que la revisara.)
+
+[S03.5] PRORROGA
+- Dura 5 dias naturales fijos desde que se activa. La fecha es automatica; el CM
+  no la elige.
+- Solo se ofrece a quien ya confirmo que va a renovar y aun no ha pagado.
+- Una sola prorroga por ciclo.
+- Admite pagos parciales o el resto. Al completar el pago, el paquete se renueva
+  solo (con el paquete elegido al confirmar).
+- Si vence sin pago completo: el ciclo se archiva solo, el cliente pasa a No
+  renovados y queda listo el mensaje de cobro para el cliente.
+- Defensa en la base: restriccion prorroga_max_5_dias, declarada NOT VALID para
+  no rechazar filas antiguas guardadas con la regla anterior de 15 dias.
+
+[S03.6] CAMBIO DE PAQUETE
+- Solo se puede cambiar de paquete al renovar.
+- Se elige al confirmar "va a renovar" (paquete, tipo y costo). Se guarda como
+  plan y se aplica cuando la renovacion se concreta.
+- Fuera de la renovacion no se editan paquete, tipo ni costo. Un CM solo corrige
+  la fecha de inicio. Un admin con escritura puede corregir capturas erroneas, y
+  queda en la bitacora.
+- Al cambiar de paquete, el contador "renovaciones con este paquete" vuelve a 0.
+  El historial de ciclos se conserva.
+
+[S03.7] NO RENOVADOS
+- Se conservan 1 ano con toda su informacion; despues se eliminan de forma
+  permanente (trabajo programado de las 12:10).
+- Reingreso: con menos de 2 meses se puede continuar el paquete anterior o crear
+  uno nuevo conservando el historial. Con 2 meses o mas se fuerza paquete nuevo y
+  se borra el historial anterior.
+- Al reingresar, el ciclo empieza hoy y renueva a los 30 dias.
+
+[S03.8] SEMAFORO
+- rojo: vencido sin decision.
+- verde: renovacion pagada.
+- amarillo: confirmada sin pago.
+- gris: pendiente dentro de plazo.
+- Un paquete vencido sigue en rojo aunque ya este pagado, hasta que se decida.
+
+[S03.9] MENSAJE AL CLIENTE (WhatsApp)
+- Texto ya redactado, con boton para abrir en WhatsApp (enlace wa.me) y boton
+  para copiar.
+- Se envia UNA sola vez: al marcarlo como enviado no se puede generar ni marcar
+  otro del mismo paquete.
+- No se integro ninguna API de pago de mensajeria.
+
+[S03.10] USUARIOS Y CONTRASENAS
+- Roles: CM y administrador. Hay administrador de solo lectura.
+- El administrador ESCRIBE la contrasena de cada usuario al crearlo y al
+  cambiarla (minimo 8, maximo 72 caracteres, sin espacios en los bordes).
+- La aplicacion nunca devuelve una contrasena y la bitacora no las guarda.
+- Todos los campos de contrasena tienen boton Ver/Ocultar.
+- El alta ofrece "Sugerir una" (aleatoria, generada en el navegador).
+- Un CM no puede cambiar contrasenas, ni la suya.
+- Bloqueo tras 5 intentos fallidos de login en 15 minutos.
+- El primer admin de produccion se crea por linea de comandos y recibe una
+  contrasena temporal que se muestra una sola vez.
+
+[S03.11] AISLAMIENTO POR CM
+- Un CM solo ve su cartera. El filtrado vive en la capa de datos
+  (backend/app/services/scope.py), nunca solo en la interfaz.
+- Si un CM pide el cm_id de otro, se ignora.
+- El admin ve todo. Un admin con escritura puede operar por un CM, y esas
+  acciones quedan en la bitacora.
+
+[S03.12] INGRESOS Y REPORTES
+- Proyeccion del periodo: suma del costo de los paquetes cuya fecha de renovacion
+  cae en el periodo (se excluyen archivados y eliminados).
+- Cobrado: pagos de esos mismos paquetes con fecha menor o igual a la fecha de
+  corte (hoy). Pendiente = proyeccion menos cobrado.
+- Periodo cerrado: se reporta completo. Periodo en curso: "Periodo parcial, corte
+  al <hoy>"; la proyeccion sigue siendo la del periodo completo.
+- Las secciones de Prorrogas y Pendientes de renovar NO se limitan al periodo:
+  son listas de trabajo con todo lo vigente a la fecha de corte.
+- Tasa de renovacion = renovados entre los ciclos que llegaron a su fecha en el
+  periodo (incluidos archivados y eliminados).
+- Un CM obtiene el mismo reporte filtrado a su cartera. El admin de solo lectura
+  puede descargar.
+
+[S03.13] CONSTANTES (configurables, no fijas en el codigo)
+CICLO_DIAS = 30
+PRORROGA_MAX_DIAS = 5
+DIAS_PARA_DECIDIR = 2
+AVISO_DIAS_ANTES_RENOVACION = 4
+AVISO_PRORROGA_DIAS = 3
+PURGA_MESES = 12
+REINGRESO_MESES = 2
+
+
+================================================================================
+[S04] MODELO DE DATOS
+================================================================================
+DECISION_CLAVE: cada fila de paquetes_cliente es UN CICLO, no el paquete para
+  siempre. Al renovar se crea una fila nueva enlazada con ciclo_anterior_id. Asi
+  los pagos, el costo y las fechas de cada ciclo quedan intactos y los reportes
+  de periodos cerrados siguen siendo exactos.
+
+TABLAS (12):
+- usuarios ................. CM y administradores (bcrypt, baja logica)
+- catalogo_paquetes ........ Basico, Estandar, Elite, Campana (editable)
+- catalogo_tipos ........... Normal, Dinamita, Fantasma, Campana (editable)
+- clientes ................. cm_id NULL = "clientes por reasignar"; credenciales
+                             de Facebook cifradas con AES-GCM
+- paquetes_cliente ......... un ciclo; estados: activo, vencido, renovado,
+                             archivado, eliminado
+- pagos .................... monto, fecha, quien lo registro
+- renovaciones ............. historial: paquete y costo antes y despues
+- archivo_no_renovados ..... entradas y salidas de "No renovados"
+- recordatorios_cliente .... mensajes de cobro, con marca de enviado
+- notificaciones ........... avisos en la aplicacion, con dedupe_key unica
+- bitacora ................. auditoria de acciones sensibles
+- jobs_ejecuciones ......... registro de los trabajos programados
+
+VISTA: v_paquete_saldo (pagado y restante por paquete)
+
+ESTADOS_DERIVADOS (no se guardan, se calculan por fecha):
+- "por vencer": activo, sin decision y faltan 4 dias o menos.
+- "vencido": paso R sin renovarse.
+- "bloqueado": vencido, sin prorroga ni gracia corriendo.
+
+MIGRACIONES (numeradas, se aplican solas al arrancar):
+001_init.sql ................ esquema inicial y trigger de actualizado_en
+002_catalogos_base.sql ...... valores iniciales de los catalogos
+003_prorroga_5_dias.sql ..... prorroga de 15 a 5 dias (NOT VALID)
+004_gracia.sql .............. columna gracia_hasta
+005_confirmado_en.sql ....... columna confirmado_en
+006_plan_renovacion.sql ..... columnas renovara_paquete_id, tipo, costo
+
+ERRORES_DEL_PROYECTO_ANTERIOR_CORREGIDOS:
+- archivo_no_renovados sin ON DELETE CASCADE rompia la purga: corregido.
+- Avisos duplicados al correr un trabajo varias veces: resuelto con dedupe_key
+  unica, lo que hace idempotentes los trabajos programados.
+
+
+================================================================================
+[S05] API (42 rutas)
+================================================================================
+AUTENTICACION
+POST   /api/auth/login
+GET    /api/auth/me
+
+EQUIPO (admin)
+GET    /api/usuarios
+POST   /api/usuarios
+POST   /api/usuarios/{usuario_id}/reset-password
+POST   /api/usuarios/{usuario_id}/baja
+
+CATALOGOS
+GET    /api/catalogos/{tabla}
+POST   /api/catalogos/{tabla}
+PATCH  /api/catalogos/{tabla}/{item_id}
+
+CLIENTES
+GET    /api/clientes
+POST   /api/clientes
+GET    /api/clientes/{cliente_id}
+PATCH  /api/clientes/{cliente_id}
+DELETE /api/clientes/{cliente_id}
+POST   /api/clientes/{cliente_id}/password-fb/ver
+POST   /api/clientes/{cliente_id}/reasignar
+
+PAQUETES Y PAGOS
+POST   /api/clientes/{cliente_id}/paquetes
+GET    /api/paquetes/{paquete_id}
+PATCH  /api/paquetes/{paquete_id}
+POST   /api/paquetes/{paquete_id}/pagos
+DELETE /api/pagos/{pago_id}
+POST   /api/paquetes/{paquete_id}/prorroga
+
+RENOVACION
+POST   /api/paquetes/{paquete_id}/confirmar-renovacion
+POST   /api/paquetes/{paquete_id}/renovar
+POST   /api/paquetes/{paquete_id}/no-renovar
+POST   /api/paquetes/{paquete_id}/revertir-decision
+GET    /api/bloqueos
+GET    /api/renovaciones/tablero
+GET    /api/clientes/{cliente_id}/reingreso-info
+POST   /api/clientes/{cliente_id}/reingreso
+
+MENSAJES AL CLIENTE
+POST   /api/paquetes/{paquete_id}/recordatorio
+GET    /api/paquetes/{paquete_id}/recordatorios
+POST   /api/recordatorios/{recordatorio_id}/marcar-enviado
+
+NOTIFICACIONES
+GET    /api/notificaciones
+POST   /api/notificaciones/{nid}/leer
+POST   /api/notificaciones/leer-todas
+
+INGRESOS Y REPORTES
+GET    /api/ingresos
+GET    /api/reportes/datos
+GET    /api/reportes/pdf
+GET    /api/reportes/excel
+
+ADMINISTRACION Y SISTEMA
+GET    /api/admin/bitacora
+POST   /api/jobs/run/{nombre}   (header X-Jobs-Secret)
+GET    /api/health
+
+
+================================================================================
+[S06] TRABAJOS PROGRAMADOS
+================================================================================
+renovaciones ......... 00:05 y 12:00. Avisa 4 dias antes; marca vencidos; archiva
+                       los marcados "no renovara" al terminar el contrato; pasa a
+                       No renovados a quien no decidio en 2 dias.
+prorrogas ............ 00:05 y 12:00. Avisa 3 dias antes de vencer; al vencer sin
+                       pago archiva, manda el cliente a No renovados y deja listo
+                       el mensaje de cobro.
+purga_no_renovados ... 12:10. Elimina clientes con 1 ano en No renovados.
+
+MOTIVO_DE_LAS_00:05: los contratos terminan a las 23:59, asi que los cambios
+  ocurren poco despues de esa hora.
+RESPALDO: POST /api/jobs/run/{nombre} con el header X-Jobs-Secret, para que
+  cron-job.org los dispare (el hosting gratuito duerme el proceso).
+IDEMPOTENCIA: correrlos varias veces no duplica efectos (dedupe_key y filtros por
+  estado y fecha).
+
+
+================================================================================
+[S07] ESTRUCTURA DE ARCHIVOS
+================================================================================
+control-clientes/
+  README.md ...................... como probarlo en un comando
+  COMO_EJECUTAR.md ............... desarrollo y pruebas
+  ESTADO.md ...................... decisiones y reglas acumuladas
+  docker-compose.yml ............. entorno normal (necesita .env)
+  docker-compose.demo.yml ........ modo demo sin configurar nada
+  docker-compose.dev.yml ......... recarga en vivo
+  render.yaml .................... despliegue en Render
+  .gitattributes ................. fuerza saltos de linea LF (arreglo Windows)
+  scripts/
+    generar_env.py ............... crea .env con claves nuevas
+    probar_sin_docker.sh ......... Postgres embebido, sin Docker ni sudo
+  docs/
+    DESPLIEGUE.md ................ guia Render + Neon + cron-job.org
+    FASE0_esquema.sql ............ diseno inicial de la base
+    FASE0_endpoints.md ........... diseno inicial de la API (quedo desfasado)
+    BITACORA_SESION.txt .......... este archivo
+  backend/
+    Dockerfile ................... dos etapas; limpia saltos de linea de Windows
+    entrypoint.sh ................ migra, siembra si toca, arranca uvicorn
+    requirements.txt ............. versiones fijas probadas
+    app/
+      config.py .................. configuracion; valida los secretos al arrancar
+      main.py .................... rutas, CORS, cabeceras de seguridad, frontend
+      models.py .................. modelos de datos
+      seed.py .................... datos de ejemplo
+      cli.py ..................... crear-admin y reset-password
+      dates.py ................... fechas en hora de Mexico
+      bitacora.py ................ auditoria
+      migrations/ ................ 6 migraciones y su ejecutor
+      routers/ ................... 9 archivos de rutas
+      services/ .................. reglas: ciclos, bloqueo, renovacion, pagos,
+                                   periodos, reporte_datos, notificar, scope
+      jobs/ ...................... tareas programadas y scheduler
+      reports/ ................... PDF (ReportLab) y Excel (openpyxl)
+      security/ .................. bcrypt, AES-GCM, JWT, limite de intentos
+    tests/ ....................... 8 archivos, 186 pruebas
+  frontend/
+    src/
+      api/ ....................... cliente HTTP y tipos
+      auth/ ...................... sesion
+      components/ ................ interfaz comun, campanita, selector de periodo
+      pages/LoginPage.tsx
+      pages/cm/CmPanel.tsx
+      pages/admin/ ............... AdminPanel, Cartera, Equipo, Catalogos,
+                                   Bitacora
+      pages/shared/ .............. ClienteFicha, Tablero, Ingresos, Reportes,
+                                   NoRenovados, modales
+
+
+================================================================================
+[S08] PRUEBAS AUTOMATIZADAS (186)
+================================================================================
+Corren contra un PostgreSQL real (no SQLite): el esquema usa CHECK, vistas,
+disparadores y JSONB. Cada corrida crea y borra su propia base temporal.
+
+test_esquema.py ............ 14  reglas en la base: prorroga maxima, estados,
+                                 pagos, derivacion de lo pagado, dedupe, cascada
+test_auth_equipo.py ........ 22  login, bloqueo por intentos, roles, alta y baja,
+                                 contrasenas elegidas por el admin
+test_clientes_paquetes.py .. 21  aislamiento por CM, ficha, cifrado, quincenas,
+                                 pagos, un paquete por cliente, fechas
+test_renovacion.py ......... 59  los tres casos, bloqueo, prorroga, mensaje unico,
+                                 reingreso, purga, trabajos, tablero
+test_ingresos_reportes.py .. 16  proyeccion y cobrado, periodos, PDF y Excel
+test_periodos.py ........... 10  quincenas, fin de mes de 28 a 31 dias, cortes
+test_produccion.py .......... 6  secretos validados, cabeceras, CLI
+test_seed_y_seguridad.py .... 6  cifrado, contrasenas, datos de ejemplo
+
+VERIFICACIONES_ADICIONALES_HECHAS_A_MANO:
+- PDF revisado pagina por pagina (logotipo, paleta, banda de periodo parcial).
+- Excel recalculado con LibreOffice para comprobar que las formulas dan los
+  mismos numeros que el JSON. Asi se encontro y corrigio un desplazamiento de
+  filas.
+- Flujos probados en el navegador: login, pago, renovacion con cambio de paquete,
+  campanita, ventana de decision, prorroga, panel de admin.
+- Arranque tipo contenedor con una URL estilo Neon.
+
+
+================================================================================
+[S09] HISTORIAL DE CAMBIOS DE REGLAS
+================================================================================
+Las reglas cambiaron varias veces durante la sesion. Esto es util para entender
+por que el codigo tiene ciertas defensas.
+
+CAMBIO 1 — tolerancia de pago
+  ANTES: 3 dias de tolerancia desde la fecha de renovacion.
+  AHORA: no hay tolerancia. A las 23:59 de R aparece la ventana de decision.
+
+CAMBIO 2 — prorroga
+  ANTES: hasta 15 dias, el CM elegia la fecha.
+  AHORA: 5 dias fijos, fecha automatica, una por ciclo, solo para quien confirmo
+         que renovara.
+
+CAMBIO 3 — permanencia en No renovados
+  ANTES: 3 meses.
+  AHORA: 1 ano.
+
+CAMBIO 4 — bloqueo
+  ANTES: una ventana global que detenia todo el sistema.
+  AHORA: la ventana vive dentro del cliente afectado; con los demas se sigue
+         trabajando.
+
+CAMBIO 5 — contrasenas
+  ANTES: las generaba el sistema (18 caracteres, se mostraban una vez).
+  AHORA: las escribe el administrador, con boton Ver para revisarlas.
+
+CAMBIO 6 — paquetes por cliente
+  ANTES: un cliente podia tener varios paquetes.
+  AHORA: un cliente tiene un solo paquete.
+
+CAMBIO 7 — cambio de paquete
+  ANTES: se podia editar el paquete en cualquier momento.
+  AHORA: solo al renovar, eligiendolo al confirmar que va a renovar.
+
+CAMBIO 8 — fecha del nuevo contrato con prorroga
+  ANTES: empezaba el dia en que se completaba el pago.
+  AHORA: conserva la fecha de renovacion original.
+
+CAMBIO 9 — boton repetido
+  Se quito "Renovo (ya pago)" porque hacia lo mismo que "Confirmo que renovara"
+  y confundia.
+
+CAMBIO 10 — importador de Excel
+  Se descarto: la cartera arranca desde cero.
+
+
+================================================================================
+[S10] COMMITS (22, en orden)
+================================================================================
+bd77fd8 | 2026-10-01 | primer borrador: esquema de la base y lista de endpoints
+be9be3f | 2026-10-01 | ajusto el diseño con lo que me contestaron (ciclo de 30 días, sin importador)
+8ec4752 | 2026-10-01 | cierro el diseño: aviso 4 días antes y el tipo es solo una etiqueta
+be28111 | 2026-10-01 | base de datos, migraciones, datos de ejemplo y docker
+39d9227 | 2026-10-01 | login con jwt, roles y gestión del equipo
+a0a1014 | 2026-10-01 | clientes, paquetes, pagos, prórroga, renovaciones y avisos
+abcdb94 | 2026-10-01 | ingresos y reportes en pdf y excel
+2642bf5 | 2026-10-01 | pantallas del cm y del admin
+15795f0 | 2026-10-01 | preparo producción: dockerfile, render y guía de despliegue
+b693fdb | 2026-10-01 | corrijo el comando del primer admin en la guía
+d52e2bb | 2026-10-01 | al cambiar de paquete al renovar se reinicia el conteo de renovaciones
+97ab337 | 2026-10-01 | script para probarlo sin docker
+43537d2 | 2026-10-01 | nuevas reglas de vencimiento: bloqueo, prórroga de 5 días y archivado automático
+f90b010 | 2026-10-01 | el admin elige las contraseñas y se pueden ver al escribirlas
+483c208 | 2026-10-01 | si paga completo en la prórroga se renueva solo
+10a7edd | 2026-10-01 | ventana de decisión dentro del cliente y confirmar que va a renovar
+165ac2d | 2026-10-01 | un paquete por cliente y el cambio de paquete solo al renovar
+043828d | 2026-10-01 | quito los comentarios del código
+82f7fe4 | 2026-10-01 | modo demo: docker compose con un solo comando y datos de ejemplo, más un README
+f83d3cd | 2026-10-01 | arreglo el arranque en Windows: saltos de línea del script y .gitattributes
+a4b2cac | 2026-10-01 | quito el botón repetido de renovó: confirmar que renueva ya renueva si está pagado
+392d471 | 2026-10-01 | más datos de ejemplo: 31 clientes con historial, todos los casos de renovación, avisos y bitácora
+
+NOTA_HISTORIAL: el historial se reescribio dos veces a peticion del usuario.
+  1) Para quitar la linea "Co-Authored-By: Claude" de todos los commits.
+  2) Para reescribir los mensajes con un tono mas natural y en minusculas.
+  En ambos casos el contenido del proyecto quedo identico; solo cambiaron los
+  mensajes y, por tanto, los identificadores. Quedo una rama de respaldo llamada
+  respaldo-antes-de-reescribir.
+  Como el historial cambio, actualizar GitHub requirio git push --force.
+
+
+================================================================================
+[S11] DATOS DE EJEMPLO
+================================================================================
+CANTIDAD: 31 clientes ficticios (10 por CM y 1 por reasignar), con 2 o 3 meses de
+  historial renovado y pagado para que Ingresos y Reportes tengan que mostrar.
+FECHAS: relativas al dia en que se cargan, asi los casos siempre estan vigentes.
+
+USUARIOS_DE_PRUEBA (contrasenas fijas, solo para desarrollo):
+admin.demo     | Admin-Demo-2026     | administrador
+lectura.demo   | Lectura-Demo-2026   | administrador de solo lectura
+ana.ruiz       | Ana-Demo-2026       | CM
+beto.luna      | Beto-Demo-2026      | CM
+carla.soto     | Carla-Demo-2026     | CM
+
+CASOS_CUBIERTOS:
+- Ventana de decision: Gimnasio FuerzaMX (no contesta), Dentista Sonrie (ya
+  pago), Boutique Aurora (confirmo y no pago).
+- Prorroga corriendo: Cafe Tlalli, Abarrotes La Esquina.
+- Confirmo que renovara: Taqueria Los Compadres (con cambio de paquete elegido),
+  Estetica Bella Vista.
+- Marcado "no renovara": Pasteleria Dulce Hogar, Floreria Jazmin.
+- Por vencer: Dra. Mariana Velez, Optica Vision Clara.
+- No renovados: 6 clientes con distinta antiguedad; Imprenta Central trae su
+  mensaje de cobro listo.
+- Por reasignar: Escuela de Baile Ritmo.
+- Vienen precargadas notificaciones, bitacora e historial de renovaciones.
+
+
+================================================================================
+[S12] COMO EJECUTARLO
+================================================================================
+[S12.1] MODO DEMO (lo mas simple; solo requiere Docker)
+  git clone https://github.com/kirito203278/control-clientes.git
+  cd control-clientes
+  docker compose -f docker-compose.demo.yml up --build
+  Abrir http://localhost:8000 y entrar con admin.demo / Admin-Demo-2026.
+  Crea las tablas y los datos de ejemplo solo. No hace falta .env.
+  Empezar limpio: docker compose -f docker-compose.demo.yml down -v
+
+[S12.2] MODO NORMAL
+  python3 scripts/generar_env.py
+  docker compose up -d --build
+  docker compose exec backend python -m app.seed
+
+[S12.3] SIN DOCKER NI SUDO
+  ./scripts/probar_sin_docker.sh
+  (levanta un PostgreSQL embebido con npm; requiere python3 y node)
+
+[S12.4] DESARROLLO CON RECARGA EN VIVO
+  docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+  cd frontend && npm install && npm run dev     (puerto 5173)
+
+[S12.5] PRUEBAS
+  docker compose up -d db
+  cd backend && . ../.venv/bin/activate && python -m pytest -q
+
+
+================================================================================
+[S13] DESPLIEGUE A PRODUCCION
+================================================================================
+GUIA_COMPLETA: docs/DESPLIEGUE.md
+ARQUITECTURA: navegador -> Render (un contenedor con API, interfaz y scheduler)
+  -> Neon (PostgreSQL). cron-job.org dispara los trabajos; UptimeRobot mantiene
+  el servicio despierto.
+UN_SOLO_PROCESO: el scheduler y el limite de intentos de login viven en memoria;
+  no escalar a mas de una instancia.
+
+PASOS:
+1. Neon: crear proyecto y copiar la cadena de conexion directa (sin "pooler"),
+   con ?sslmode=require.
+2. Render: New -> Blueprint, elegir el repositorio (lee render.yaml) y llenar
+   DATABASE_URL, AES_KEY_B64 y CORS_ORIGINS. JWT_SECRET y JOBS_SECRET los genera
+   Render.
+3. Primer admin, desde la computadora y contra Neon:
+   python -m app.cli crear-admin "Nombre Apellido"
+4. cron-job.org: 5 tareas (renovaciones 00:05 y 12:00, prorrogas 00:05 y 12:00,
+   purga 12:10), metodo POST, header X-Jobs-Secret, zona America/Mexico_City.
+5. UptimeRobot: monitor a /api/health cada 5 minutos.
+
+AVISO_IMPORTANTE: guardar una copia de AES_KEY_B64. Sin esa clave no se pueden
+  recuperar las contrasenas de Facebook guardadas, y si se cambia despues de
+  tener clientes, quedan ilegibles.
+
+ESTADO_ACTUAL_DEL_DESPLIEGUE:
+- Base creada en Neon (proyecto control-clientes, rama production).
+- Migraciones aplicadas en Neon (001 a 006) y primer admin creado.
+- Falta crear el servicio en Render y configurar los cron.
+- La contrasena de la base de Neon quedo expuesta en el chat durante las
+  pruebas; el usuario decidio seguir asi por tratarse de pruebas. DEBE cambiarse
+  (Neon -> Roles -> Reset password) antes de cargar clientes reales, y actualizar
+  DATABASE_URL en Render.
+
+
+================================================================================
+[S14] SEGURIDAD
+================================================================================
+- Secretos solo en .env, que esta en .gitignore desde el primer commit.
+- La configuracion valida los secretos al arrancar: con valores debiles o
+  invalidos la aplicacion no arranca.
+- Cabeceras de seguridad: nosniff, DENY de marcos, referrer same-origin y
+  no-store en las rutas de la API.
+- La documentacion interactiva (/docs) esta apagada salvo en desarrollo.
+- CORS por variable de entorno, nunca con comodin.
+- El contenedor corre con un usuario sin privilegios.
+- Las credenciales de Facebook se cifran con AES-GCM y solo se muestran al pulsar
+  "Ver", lo que queda en la bitacora.
+- Claves nuevas: no se reutilizo ninguna del proyecto anterior.
+
+
+================================================================================
+[S15] PROBLEMAS ENCONTRADOS Y COMO SE RESOLVIERON
+================================================================================
+P01 | Docker no estaba instalado en la maquina del usuario.
+    | Solucion: se creo scripts/probar_sin_docker.sh con PostgreSQL embebido.
+    | Despues el usuario instalo Docker y el plugin de Compose.
+
+P02 | "permission denied" en el socket de Docker.
+    | Causa: faltaba activar el grupo docker en la sesion.
+    | Solucion: usermod -aG docker, y newgrp docker o reiniciar sesion.
+
+P03 | "exec ./entrypoint.sh: no such file or directory" en Windows.
+    | Causa: Git convierte los saltos de linea a formato Windows y el script deja
+    | de ser ejecutable en Linux. Se reprodujo el fallo con un script de prueba.
+    | Solucion: .gitattributes fuerza LF y el Dockerfile limpia el archivo al
+    | construir la imagen.
+
+P04 | El Excel generado tenia las filas desplazadas.
+    | Causa: usar ws.cell() para fijar los paneles creaba una fila vacia.
+    | Se detecto recalculando con LibreOffice.
+
+P05 | La restriccion de prorroga rechazaba datos existentes al migrar.
+    | Solucion: declarar la restriccion NOT VALID.
+
+P06 | Al agregar columnas al catalogo, las relaciones del ORM quedaron ambiguas.
+    | Solucion: declarar las claves foraneas de forma explicita.
+
+P07 | APScheduler 3 no admite combinar disparadores con el operador "|".
+    | Solucion: usar OrTrigger.
+
+P08 | El texto de los modales se veia blanco sobre blanco.
+    | Causa: heredaba el color de la barra lateral oscura.
+
+P09 | La guia de despliegue traia un comando que la validacion nueva rechazaba.
+    | Se corrigio y se probo el comando real.
+
+P10 | La colaboradora seguia viendo el error del script aunque ya estaba
+    | corregido en GitHub: su copia era anterior a la reescritura del historial.
+    | Solucion recomendada: clonar de nuevo.
+
+
+================================================================================
+[S16] DECISIONES DEL ASISTENTE QUE CONVIENE REVISAR
+================================================================================
+D01 | Quien ya confirmo que renueva no tiene plazo automatico de 2 dias: la
+    | ventana queda pendiente hasta que el CM decida.
+D02 | "Renovo" exige el paquete pagado por completo. Por eso la columna
+    | "Renovados sin pago" del tablero casi no se llena.
+D03 | Se quito la pregunta "¿El cliente pago?" de la campanita: ahora el
+    | vencimiento de la prorroga actua solo y deja el mensaje listo.
+D04 | Un admin con escritura puede capturar pagos, prorrogas y renovaciones por
+    | un CM, y queda en la bitacora.
+D05 | En los reportes, un periodo cerrado cuenta todos los pagos hechos hasta
+    | hoy, incluidos los tardios.
+D06 | La regla de un paquete por cliente se aplica en la aplicacion, no con un
+    | indice unico en la base.
+D07 | Los datos de los clientes no se guardan en el repositorio: se regeneran
+    | con el seed en cada computadora.
+
+
+================================================================================
+[S17] LIMITACIONES CONOCIDAS
+================================================================================
+L01 | No se probo con Docker en la maquina del asistente (no estaba instalado).
+    | El modo demo se verifico con las mismas variables pero sin Docker.
+L02 | No se probaron las notificaciones nativas del navegador.
+L03 | El diseno es para escritorio: la barra lateral es fija, no hay version
+    | para telefono.
+L04 | docs/FASE0_endpoints.md es el diseno inicial y quedo desfasado respecto a
+    | la API final.
+L05 | No hay pruebas automatizadas del frontend; se verifico con TypeScript, la
+    | compilacion y pruebas manuales en el navegador.
+L06 | La bitacora solo se puede leer: no se edita ni se borra desde la
+    | aplicacion.
+
+
+================================================================================
+[S18] PENDIENTES
+================================================================================
+T01 | Subir a GitHub los ultimos commits (git push origin main).
+T02 | Crear el servicio en Render y configurar las variables.
+T03 | Configurar las 5 tareas de cron-job.org y el monitor de UptimeRobot.
+T04 | Cambiar la contrasena de la base en Neon antes de cargar datos reales.
+T05 | Renombrar o reemplazar el admin creado en Neon: quedo como
+    | "Tu Nombre Apellido" porque se copio el texto de ejemplo.
+T06 | Que la colaboradora clone de nuevo el repositorio para recibir el arreglo
+    | de Windows y los datos de ejemplo ampliados.
+T07 | Dar de alta al equipo real y limpiar los datos de prueba antes de empezar.
+
+
+================================================================================
+[S19] PROYECTO DE REFERENCIA (sistema de campanas)
+================================================================================
+UBICACION: ~/Documentos/referencia/sistema-campanas-master
+RESPALDO_INTACTO: ~/Documentos/referencia/sistema-campanas-master.original
+RELACION: proyecto anterior de la misma agencia, usado como referencia de estilo
+  y de patrones (paleta morada, barra lateral oscura, tarjetas, modales,
+  semaforos, cifrado, trabajos programados, reportes).
+
+TRABAJO_ADICIONAL_HECHO_EN_ESA_CARPETA (a peticion del usuario, para que su
+colaboradora pudiera probar tambien ese sistema):
+- Se creo backend/app/seed_demo.py con 19 clientes ficticios (16 activos y 3 en
+  No renovados), campanas, semanas capturadas, resumenes de meses anteriores,
+  observaciones, notificaciones y bitacora.
+- Se creo docker-compose.demo.yml para levantarlo con un comando en el puerto
+  8001 (para no chocar con el sistema de clientes, que usa el 8000).
+- Se creo README.md con los usuarios de prueba y que mirar.
+- Se creo .gitattributes y se aplico el mismo arreglo de Windows al Dockerfile.
+- Se modifico backend/entrypoint.sh para cargar los datos si SEED_DEMO=true.
+USUARIOS_DE_PRUEBA: luz.admin / Admin-Demo-2026, lectura.demo /
+  Lectura-Demo-2026, y los CM kori, saray, uriel, alondra, fatima, luz.cm con el
+  patron Nombre-Demo-2026.
+ADVERTENCIA: esa carpeta no es un repositorio Git; es una copia descomprimida.
+  El repositorio real esta en github.com/kirito203278/sistema-campanas.
+
+
+================================================================================
+[S20] FORMA DE TRABAJO ACORDADA
+================================================================================
+- Se trabajo por fases (0 a 7), con pausas para que el usuario probara.
+- Commit al terminar cada fase y ESTADO.md actualizado.
+- Para cada regla critica, al menos una prueba automatizada.
+- Si una instruccion chocaba con lo visto en el proyecto anterior, se avisaba en
+  lugar de decidir en silencio.
+- Secretos solo en .env, en .gitignore desde el primer commit.
+- A peticion del usuario: los commits NO llevan linea de coautor y el asistente
+  NUNCA hace push; eso lo hace siempre el usuario con su sesion de GitHub.
+- A peticion del usuario: se quitaron todos los comentarios del codigo (Python,
+  TypeScript, SQL, CSS y archivos de configuracion). Se conservaron los
+  documentos y el .env.example, porque ahi son instrucciones de uso. El texto de
+  ayuda del CLI paso de comentario a constante para que siguiera funcionando.
+
+================================================================================
+FIN DE LA BITACORA
+================================================================================

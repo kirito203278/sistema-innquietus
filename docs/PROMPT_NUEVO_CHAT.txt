@@ -1,0 +1,70 @@
+================================================================================
+PROMPT PARA UN CHAT NUEVO — SISTEMA DE CONTROL DE CLIENTES (INNquietus)
+================================================================================
+Instrucciones de uso:
+  1. Abre el chat nuevo en la carpeta ~/Documentos/control-clientes
+  2. Adjunta el archivo docs/BITACORA_SESION.txt
+  3. Pega el bloque de abajo (desde "Contexto" hasta el final)
+  4. Cambia la ultima seccion "Lo que necesito" por lo que quieras pedir
+================================================================================
+
+
+Contexto
+
+Vengo de otra conversación donde se construyó completo este sistema. Te adjunto
+`docs/BITACORA_SESION.txt`: es la bitácora de esa sesión, con 20 secciones
+etiquetadas [S01] a [S20]. Léela antes de proponer nada, porque ahí están las
+reglas de negocio vigentes, las decisiones tomadas y lo que falta.
+
+Secciones que más importan:
+- [S03] reglas de negocio vigentes (subsecciones [S03.1] a [S03.13])
+- [S04] modelo de datos y migraciones
+- [S09] historial de cambios de reglas: qué cambió y por qué
+- [S16] decisiones del asistente anterior que conviene revisar
+- [S17] limitaciones conocidas
+- [S18] pendientes
+
+El proyecto
+- Carpeta: ~/Documentos/control-clientes
+- Repositorio privado: github.com/kirito203278/control-clientes
+- Backend: Python + FastAPI + SQLAlchemy + PostgreSQL
+- Frontend: React + TypeScript + Vite, compilado y servido por el backend
+- 186 pruebas automatizadas, todas en verde
+- Levantarlo para probar: docker compose -f docker-compose.demo.yml up --build
+  (abre http://localhost:8000, usuario admin.demo, contraseña 10000001)
+- Correr las pruebas: cd backend && python -m pytest -q
+  (necesitan un PostgreSQL real; cada corrida crea y borra su propia base)
+
+Cómo quiero que trabajes
+- Antes de cambiar una regla de negocio, revisa [S03] y [S09]: muchas ya se
+  cambiaron una o dos veces y no quiero volver atrás sin darme cuenta.
+- Para cada regla crítica que toques, escribe o ajusta su prueba automatizada.
+- No agregues la línea "Co-Authored-By" a los mensajes de commit.
+- Nunca hagas `git push`: los commits los subo yo con mi sesión de GitHub.
+- Los secretos van solo en `.env`, que está en `.gitignore`.
+- Si algo que te pido choca con una regla de la bitácora, dímelo en vez de
+  decidir por tu cuenta.
+- Respuestas cortas; no repitas código que ya escribiste.
+
+Lo que necesito
+<< ESCRIBE AQUÍ LO QUE QUIERES. Ejemplos:
+
+  (a) Script de verificación
+      Escribe un script que compare la bitácora con el código real y me diga si
+      algo ya no coincide: constantes de [S03.13] contra backend/app/config.py,
+      tablas de [S04] contra las migraciones, rutas de [S05] contra los archivos
+      de backend/app/routers/, número de pruebas de [S08] contra las que existen,
+      y commits de [S10] contra `git log`. Que imprima un reporte con lo que
+      coincide y lo que no.
+
+  (b) Revisión del proyecto
+      Revisa las decisiones de [S16] y las limitaciones de [S17], y dime cuáles
+      valdría la pena cambiar y qué implicaría cada una.
+
+  (c) Seguir el trabajo
+      Ayúdame con los pendientes de [S18], empezando por el despliegue en
+      Render.
+
+  (d) Otra cosa
+      Describe aquí lo que quieras.
+>>
